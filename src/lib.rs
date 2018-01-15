@@ -84,9 +84,10 @@ where
 
     pub fn run<F, R>(self, workers: usize, on_ready: F) -> PoolHandle<R>
     where
-        F: Fn(&A::Connection, &mut R) -> bool + 'static + Send + Clone,
+        F: Fn(&A::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
         R: 'static + Default + Send,
     {
+        let on_ready = Arc::new(on_ready);
         let wrkrs: Vec<_> = (0..workers)
             .map(|_| worker_main(&self, on_ready.clone()))
             .collect();
@@ -104,10 +105,10 @@ impl<R> PoolHandle<R> {
     }
 }
 
-fn worker_main<A, F, R>(pool: &Pool<A>, on_ready: F) -> thread::JoinHandle<R>
+fn worker_main<A, F, R>(pool: &Pool<A>, on_ready: Arc<F>) -> thread::JoinHandle<R>
 where
     A: 'static + Listener,
-    F: Fn(&A::Connection, &mut R) -> bool + 'static + Send,
+    F: Fn(&A::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
     R: 'static + Default + Send,
 {
     let mut cache_epoch;
@@ -185,7 +186,25 @@ where
                 } else {
                     match cache.token_to_conn.get(t - 1) {
                         Some(c) => {
-                            if !on_ready(&**c, &mut worker_result) {
+                            let r = on_ready(&**c, &mut worker_result);
+                            let mut closed = false;
+                            if let Ok(true) = r {
+                                closed = true;
+                            }
+                            if let Err(e) = r {
+                                match e.kind() {
+                                    io::ErrorKind::BrokenPipe
+                                    | io::ErrorKind::NotConnected
+                                    | io::ErrorKind::UnexpectedEof
+                                    | io::ErrorKind::ConnectionAborted
+                                    | io::ErrorKind::ConnectionReset => {
+                                        closed = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            if closed {
                                 // connection was dropped; update truth
                                 let mut truth = truth.lock().unwrap();
                                 cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::AcqRel);
