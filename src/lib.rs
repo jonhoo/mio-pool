@@ -65,7 +65,7 @@ use std::io;
 use std::thread;
 use std::time::Duration;
 use std::sync::{atomic, Arc, Mutex};
-use mio::{PollOpt, Ready, Token};
+use mio::*;
 use slab::Slab;
 
 const NO_EXIT: usize = 0;
@@ -116,7 +116,7 @@ where
     truth: Arc<Mutex<PoolContext<L>>>,
     epoch: Arc<atomic::AtomicUsize>,
     exit: Arc<atomic::AtomicUsize>,
-    poll: Arc<mio::Poll>,
+    poll: Arc<Poll>,
 }
 
 struct PoolContext<L>
@@ -141,9 +141,9 @@ where
 
 /// Types that implement `Listener` are mio-pollable, and can accept new connections that are
 /// themselves mio-pollable.
-pub trait Listener: mio::Evented + Sync + Send {
+pub trait Listener: Evented + Sync + Send {
     /// The type of connections yielded by `accept`.
-    type Connection: mio::Evented + Sync + Send;
+    type Connection: Evented + Sync + Send;
 
     /// Accept a new connection.
     ///
@@ -152,8 +152,8 @@ pub trait Listener: mio::Evented + Sync + Send {
     fn accept(&self) -> io::Result<Self::Connection>;
 }
 
-impl Listener for mio::net::TcpListener {
-    type Connection = mio::net::TcpStream;
+impl Listener for net::TcpListener {
+    type Connection = net::TcpStream;
     fn accept(&self) -> io::Result<Self::Connection> {
         self.accept().map(|(c, _)| c)
     }
@@ -168,7 +168,7 @@ where
     /// The pool will monitor the listener for new connections, and distribute the task of
     /// accepting them, and handling requests to accepted connections, among a pool of threads.
     pub fn from(listener: L) -> io::Result<Self> {
-        let poll = mio::Poll::new()?;
+        let poll = Poll::new()?;
         poll.register(
             &listener,
             Token(0),
@@ -272,7 +272,7 @@ where
 
     thread::spawn(move || {
         let mut worker_result = R::default();
-        let mut events = mio::Events::with_capacity(1);
+        let mut events = Events::with_capacity(1);
         let mut status = NO_EXIT;
         while status != EXIT_IMMEDIATE {
             if let Err(e) = poll.poll(&mut events, Some(Duration::from_millis(200))) {
