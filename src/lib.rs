@@ -89,7 +89,7 @@ where
     {
         let on_ready = Arc::new(on_ready);
         let wrkrs: Vec<_> = (0..workers)
-            .map(|_| worker_main(&self, on_ready.clone()))
+            .map(|i| worker_main(i, &self, Arc::clone(&on_ready)))
             .collect();
         PoolHandle {
             threads: wrkrs,
@@ -105,7 +105,7 @@ impl<R> PoolHandle<R> {
     }
 }
 
-fn worker_main<A, F, R>(pool: &Pool<A>, on_ready: Arc<F>) -> thread::JoinHandle<R>
+fn worker_main<A, F, R>(_i: usize, pool: &Pool<A>, on_ready: Arc<F>) -> thread::JoinHandle<R>
 where
     A: 'static + Listener,
     F: Fn(&A::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
