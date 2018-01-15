@@ -10,7 +10,7 @@ fn one_client() {
     let addr = "127.0.0.1:0".parse().unwrap();
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
-    let pool = Pool::new(server).unwrap();
+    let pool = PoolBuilder::from(server).unwrap();
     let h = pool.run(1, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
@@ -27,7 +27,7 @@ fn one_client() {
     let mut buf = [0u8; 1024];
     let n = c.read(&mut buf).unwrap();
     assert_eq!(&buf[..n], b"yes indeed");
-    let mut r = h.wait();
+    let mut r = h.terminate();
     assert_eq!(r.len(), 1);
     let r = r.swap_remove(0).unwrap();
     assert_eq!(&r, b"hello world");
@@ -38,7 +38,7 @@ fn multi_rtt() {
     let addr = "127.0.0.1:0".parse().unwrap();
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
-    let pool = Pool::new(server).unwrap();
+    let pool = PoolBuilder::from(server).unwrap();
     let h = pool.run(1, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
@@ -57,7 +57,7 @@ fn multi_rtt() {
         let n = c.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"yes indeed");
     }
-    let mut r = h.wait();
+    let mut r = h.terminate();
     assert_eq!(r.len(), 1);
     let r = r.swap_remove(0).unwrap();
     let mut r = &r[..];
@@ -72,7 +72,7 @@ fn client_churn() {
     let addr = "127.0.0.1:0".parse().unwrap();
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
-    let pool = Pool::new(server).unwrap();
+    let pool = PoolBuilder::from(server).unwrap();
     let h = pool.run(1, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
@@ -93,7 +93,7 @@ fn client_churn() {
         assert_eq!(&buf[..n], b"yes indeed");
     }
 
-    let mut r = h.wait();
+    let mut r = h.terminate();
     assert_eq!(r.len(), 1);
     let r = r.swap_remove(0).unwrap();
     let mut r = &r[..];
@@ -108,7 +108,7 @@ fn client_churn_two_workers() {
     let addr = "127.0.0.1:0".parse().unwrap();
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
-    let pool = Pool::new(server).unwrap();
+    let pool = PoolBuilder::from(server).unwrap();
     let h = pool.run(2, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
@@ -129,7 +129,7 @@ fn client_churn_two_workers() {
         assert_eq!(&buf[..n], b"yes indeed");
     }
 
-    let r = h.wait();
+    let r = h.terminate();
     assert_eq!(r.len(), 2);
     for r in r {
         let r = r.unwrap();
@@ -146,7 +146,7 @@ fn many_workers() {
     let addr = "127.0.0.1:0".parse().unwrap();
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
-    let pool = Pool::new(server).unwrap();
+    let pool = PoolBuilder::from(server).unwrap();
     let h = pool.run(10, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
@@ -176,7 +176,7 @@ fn many_workers() {
         assert_eq!(&c.join().unwrap()[..], b"yes indeed");
     }
 
-    let r = h.wait();
+    let r = h.terminate();
     assert_eq!(r.len(), 10);
     for r in r {
         let r = r.unwrap();

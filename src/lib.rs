@@ -1,3 +1,62 @@
+//! A worker pool collectively handling a set of connections.
+//!
+//! This crate is written for the use-case where a server is listening for connections, and wants
+//! to spread the load of handling accepted connections across multiple threads. Specifically, this
+//! crate implements a worker pool that shares a single `mio::Poll` instance, and collectively
+//! accept new connections and handle events for existing ones.
+//!
+//! Users will want to start with the `PoolBuilder` struct, which allows creating a new pool from
+//! anything that can act as a `Listener` (basically, anything that can be polled and accept new
+//! connections that can themselves be polled; e.g., `mio::net::TcpListener`).
+//!
+//! # Examples
+//!
+//! ```
+//! # extern crate mio;
+//! # extern crate mio_pool;
+//! # use mio_pool::PoolBuilder;
+//! # fn main() {
+//! use std::io::prelude::*;
+//!
+//! let addr = "127.0.0.1:0".parse().unwrap();
+//! let server = mio::net::TcpListener::bind(&addr).unwrap();
+//! let addr = server.local_addr().unwrap();
+//! let pool = PoolBuilder::from(server).unwrap();
+//! let h = pool.run(1 /* # workers */, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
+//!     // new data is available on the connection `c`!
+//!     let mut buf = [0u8; 1024];
+//!
+//!     // let's just echo back what we read
+//!     let n = c.read(&mut buf)?;
+//!     if n == 0 {
+//!         return Ok(true);
+//!     }
+//!     c.write_all(&buf[..n])?;
+//!
+//!     // keep some internal state
+//!     s.extend(&buf[..n]);
+//!
+//!     // assume there could be more data
+//!     Ok(false)
+//! });
+//!
+//! // new clients can now connect on `addr`
+//! use std::net::TcpStream;
+//! let mut c = TcpStream::connect(&addr).unwrap();
+//! c.write_all(b"hello world").unwrap();
+//! let mut buf = [0u8; 1024];
+//! let n = c.read(&mut buf).unwrap();
+//! assert_eq!(&buf[..n], b"hello world");
+//!
+//! // we can terminate the pool at any time
+//! let results = h.terminate();
+//! // results here contains the final state of each worker in the pool.
+//! // that is, the final value in each `s` passed to the closure in `run`.
+//! let result = results.into_iter().next().unwrap();
+//! assert_eq!(&result.unwrap(), b"hello world");
+//! # }
+//! ```
+#![deny(missing_docs)]
 #![feature(nll)]
 
 extern crate mio;
@@ -10,44 +69,83 @@ use std::sync::{atomic, Arc, Mutex};
 use mio::{PollOpt, Ready, Token};
 use slab::Slab;
 
-pub struct Pool<A>
+/// Used to configure a mio pool before launching it.
+///
+/// Users will want to call `PoolBuilder::from` to start a new pool from a `Listener`, and then
+/// `PoolBuilder::run` to begin accepting and handling connections.
+///
+/// # Examples
+///
+/// ```
+/// # extern crate mio;
+/// # extern crate mio_pool;
+/// # use mio_pool::PoolBuilder;
+/// # fn main() {
+/// let addr = "127.0.0.1:0".parse().unwrap();
+/// let server = mio::net::TcpListener::bind(&addr).unwrap();
+/// let pool = PoolBuilder::from(server).unwrap();
+/// let h = pool.run(1 /* # workers */, |mut c: &mio::net::TcpStream, s: &mut ()| {
+///     use std::io::prelude::*;
+///     let mut buf = [0u8; 1024];
+///     let n = c.read(&mut buf)?;
+///     if n == 0 {
+///         return Ok(true);
+///     }
+///     c.write_all(&buf[..n])?;
+///     Ok(false)
+/// });
+///
+/// // ...
+/// // during this period, new clients can connect
+/// // ...
+///
+/// let results = h.terminate();
+/// // results here contains the final state of each worker in the pool.
+/// // that is, the final value in each `s` passed to the closure in `run`.
+/// let result = results.into_iter().next().unwrap();
+/// assert_eq!(result.unwrap(), ());
+/// # }
+/// ```
+pub struct PoolBuilder<L>
 where
-    A: Listener,
+    L: Listener,
 {
-    truth: Arc<Mutex<PoolContext<A>>>,
+    truth: Arc<Mutex<PoolContext<L>>>,
     epoch: Arc<atomic::AtomicUsize>,
     exit: Arc<atomic::AtomicBool>,
     poll: Arc<mio::Poll>,
 }
 
-struct PoolContext<A>
+struct PoolContext<L>
 where
-    A: Listener,
+    L: Listener,
 {
-    acceptor: Arc<A>,
-    token_to_conn: Slab<Arc<A::Connection>>,
+    listener: Arc<L>,
+    token_to_conn: Slab<Arc<L::Connection>>,
 }
 
-impl<A> Clone for PoolContext<A>
+impl<L> Clone for PoolContext<L>
 where
-    A: Listener,
+    L: Listener,
 {
     fn clone(&self) -> Self {
         PoolContext {
-            acceptor: Arc::clone(&self.acceptor),
+            listener: Arc::clone(&self.listener),
             token_to_conn: self.token_to_conn.clone(),
         }
     }
 }
 
-pub struct PoolHandle<R> {
-    threads: Vec<thread::JoinHandle<R>>,
-    exit: Arc<atomic::AtomicBool>,
-}
-
+/// Types that implement `Listener` are mio-pollable, and can accept new connections that are
+/// themselves mio-pollable.
 pub trait Listener: mio::Evented + Sync + Send {
+    /// The type of connections yielded by `accept`.
     type Connection: mio::Evented + Sync + Send;
 
+    /// Accept a new connection.
+    ///
+    /// This method will only be called when `mio::Ready::readable` is raised for the `Listener` by
+    /// a `poll`.
     fn accept(&self) -> io::Result<Self::Connection>;
 }
 
@@ -58,22 +156,26 @@ impl Listener for mio::net::TcpListener {
     }
 }
 
-impl<A> Pool<A>
+impl<L> PoolBuilder<L>
 where
-    A: 'static + Listener,
+    L: 'static + Listener,
 {
-    pub fn new(acceptor: A) -> io::Result<Self> {
+    /// Prepare a new pool from the given listener.
+    ///
+    /// The pool will monitor the listener for new connections, and distribute the task of
+    /// accepting them, and handling requests to accepted connections, among a pool of threads.
+    pub fn from(listener: L) -> io::Result<Self> {
         let poll = mio::Poll::new()?;
         poll.register(
-            &acceptor,
+            &listener,
             Token(0),
             Ready::readable(),
             PollOpt::level() | PollOpt::oneshot(),
         )?;
 
-        Ok(Pool {
+        Ok(PoolBuilder {
             truth: Arc::new(Mutex::new(PoolContext {
-                acceptor: Arc::new(acceptor),
+                listener: Arc::new(listener),
                 token_to_conn: Slab::new(),
             })),
             epoch: Arc::new(atomic::AtomicUsize::new(1)),
@@ -82,9 +184,18 @@ where
         })
     }
 
+    /// Start accepting and handling connections using this pool.
+    ///
+    /// The pool will consist of `workers` worker threads that each accept new connections and
+    /// handle requests arriving at existing ones. Every time a connection has available data,
+    /// `on_ready` will be called by one of the workers. A connection will stay in the pool until
+    /// `on_ready` returns an error, or `Ok(true)` indicating EOF.
+    ///
+    /// Each worker also has local state of type `R`. This state can be mutated by `on_ready`, and
+    /// is returned when the pool exits.
     pub fn run<F, R>(self, workers: usize, on_ready: F) -> PoolHandle<R>
     where
-        F: Fn(&A::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
+        F: Fn(&L::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
         R: 'static + Default + Send,
     {
         let on_ready = Arc::new(on_ready);
@@ -98,17 +209,39 @@ where
     }
 }
 
+/// A handle to a currently executing mio pool.
+///
+/// This handle can be used to terminate the running pool, and to wait for its completion.
+/// See `PoolHandle::terminate` and `PoolHandle::wait` for details.
+pub struct PoolHandle<R> {
+    threads: Vec<thread::JoinHandle<R>>,
+    exit: Arc<atomic::AtomicBool>,
+}
+
 impl<R> PoolHandle<R> {
-    pub fn wait(self) -> Vec<thread::Result<R>> {
+    /// Tell all running workers to terminate, and then wait for their completion.
+    ///
+    /// Note that this will *not* wait for existing connections to terminate, but termination may
+    /// be delayed until the next time each worker is idle.
+    pub fn terminate(self) -> Vec<thread::Result<R>> {
         self.exit.store(true, atomic::Ordering::SeqCst);
+        self.wait()
+    }
+
+    /// Wait for all running workers to terminate.
+    ///
+    /// This method will *not* tell worker threads to exit, and so will only return once when all
+    /// worker threads have crashed (which should not happen in general). Users may instead want to
+    /// use `PoolHandle::terminate`.
+    pub fn wait(self) -> Vec<thread::Result<R>> {
         self.threads.into_iter().map(|jh| jh.join()).collect()
     }
 }
 
-fn worker_main<A, F, R>(_i: usize, pool: &Pool<A>, on_ready: Arc<F>) -> thread::JoinHandle<R>
+fn worker_main<L, F, R>(_i: usize, pool: &PoolBuilder<L>, on_ready: Arc<F>) -> thread::JoinHandle<R>
 where
-    A: 'static + Listener,
-    F: Fn(&A::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
+    L: 'static + Listener,
+    F: Fn(&L::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
     R: 'static + Default + Send,
 {
     let mut cache_epoch;
@@ -165,7 +298,7 @@ where
                     // let's assume we accept at least one connection
                     cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
 
-                    while let Ok(c) = cache.acceptor.accept() {
+                    while let Ok(c) = cache.listener.accept() {
                         let c = Arc::new(c);
 
                         // pick a token for this new connection
@@ -186,7 +319,7 @@ where
 
                     // need to re-register listening thread
                     poll.reregister(
-                        &*cache.acceptor,
+                        &*cache.listener,
                         Token(0),
                         Ready::readable(),
                         PollOpt::level() | PollOpt::oneshot(),
