@@ -119,90 +119,6 @@ where
     poll: Arc<Poll>,
 }
 
-/// Types that implement `Listener` are mio-pollable, and can accept new connections that are
-/// themselves mio-pollable.
-pub trait Listener: Evented + Sync + Send {
-    /// The type of connections yielded by `accept`.
-    type Connection: Evented + Send;
-
-    /// Accept a new connection.
-    ///
-    /// This method will only be called when `mio::Ready::readable` is raised for the `Listener` by
-    /// a `poll`.
-    fn accept(&self) -> io::Result<Self::Connection>;
-}
-
-impl Listener for net::TcpListener {
-    type Connection = net::TcpStream;
-    fn accept(&self) -> io::Result<Self::Connection> {
-        self.accept().map(|(c, _)| c)
-    }
-}
-
-/// This is a bit of a hack, but allows mutable access to the underlying channels.
-///
-/// Specifically, since EPOLL_ONESHOT (should) guarantee that only one thread is woken up when
-/// there's an event on a given socket, and we ensure that no thread touches a connection after it
-/// re-registers it, we know that a thread that is woken up for a given connection has exclusive
-/// access to that connection. This means that we are okay to hand out an `&mut C` to the
-/// `on_ready` function, since it cannot leak that mutable reference anywhere.
-struct OneshotConnection<C>(Arc<C>, *mut C);
-
-impl<C> Evented for OneshotConnection<C>
-where
-    C: Evented,
-{
-    fn register(
-        &self,
-        poll: &Poll,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> io::Result<()> {
-        self.0.register(poll, token, interest, opts)
-    }
-
-    fn reregister(
-        &self,
-        poll: &Poll,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> io::Result<()> {
-        self.0.reregister(poll, token, interest, opts)
-    }
-
-    fn deregister(&self, poll: &Poll) -> io::Result<()> {
-        self.0.deregister(poll)
-    }
-}
-
-impl<C> OneshotConnection<C> {
-    pub fn new(conn: C) -> Self {
-        let mut conn = Arc::new(conn);
-        let c = { Arc::get_mut(&mut conn).unwrap() as *mut _ };
-        OneshotConnection(conn, c)
-    }
-
-    unsafe fn mut_given_epoll_oneshot<'a>(&'a self) -> &'a mut C {
-        &mut *self.1
-    }
-}
-
-unsafe impl<C> Send for OneshotConnection<C>
-where
-    C: Send,
-{
-}
-
-// This is *only* okay because no two threads should ever be referencing a given connection at the
-// same time.
-unsafe impl<C> Sync for OneshotConnection<C>
-where
-    C: Send,
-{
-}
-
 impl<L> PoolBuilder<L>
 where
     L: 'static + Listener,
@@ -482,4 +398,88 @@ where
 
         worker_result
     })
+}
+
+/// Types that implement `Listener` are mio-pollable, and can accept new connections that are
+/// themselves mio-pollable.
+pub trait Listener: Evented + Sync + Send {
+    /// The type of connections yielded by `accept`.
+    type Connection: Evented + Send;
+
+    /// Accept a new connection.
+    ///
+    /// This method will only be called when `mio::Ready::readable` is raised for the `Listener` by
+    /// a `poll`.
+    fn accept(&self) -> io::Result<Self::Connection>;
+}
+
+impl Listener for net::TcpListener {
+    type Connection = net::TcpStream;
+    fn accept(&self) -> io::Result<Self::Connection> {
+        self.accept().map(|(c, _)| c)
+    }
+}
+
+/// This is a bit of a hack, but allows mutable access to the underlying channels.
+///
+/// Specifically, since EPOLL_ONESHOT (should) guarantee that only one thread is woken up when
+/// there's an event on a given socket, and we ensure that no thread touches a connection after it
+/// re-registers it, we know that a thread that is woken up for a given connection has exclusive
+/// access to that connection. This means that we are okay to hand out an `&mut C` to the
+/// `on_ready` function, since it cannot leak that mutable reference anywhere.
+struct OneshotConnection<C>(Arc<C>, *mut C);
+
+impl<C> Evented for OneshotConnection<C>
+where
+    C: Evented,
+{
+    fn register(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
+        self.0.register(poll, token, interest, opts)
+    }
+
+    fn reregister(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
+        self.0.reregister(poll, token, interest, opts)
+    }
+
+    fn deregister(&self, poll: &Poll) -> io::Result<()> {
+        self.0.deregister(poll)
+    }
+}
+
+impl<C> OneshotConnection<C> {
+    pub fn new(conn: C) -> Self {
+        let mut conn = Arc::new(conn);
+        let c = { Arc::get_mut(&mut conn).unwrap() as *mut _ };
+        OneshotConnection(conn, c)
+    }
+
+    unsafe fn mut_given_epoll_oneshot<'a>(&'a self) -> &'a mut C {
+        &mut *self.1
+    }
+}
+
+unsafe impl<C> Send for OneshotConnection<C>
+where
+    C: Send,
+{
+}
+
+// This is *only* okay because no two threads should ever be referencing a given connection at the
+// same time.
+unsafe impl<C> Sync for OneshotConnection<C>
+where
+    C: Send,
+{
 }
