@@ -68,6 +68,10 @@ use std::sync::{atomic, Arc, Mutex};
 use mio::{PollOpt, Ready, Token};
 use slab::Slab;
 
+const NO_EXIT: usize = 0;
+const EXIT_IMMEDIATE: usize = 1;
+const EXIT_EVENTUALLY: usize = 2;
+
 /// Used to configure a mio pool before launching it.
 ///
 /// Users will want to call `PoolBuilder::from` to start a new pool from a `Listener`, and then
@@ -111,7 +115,7 @@ where
 {
     truth: Arc<Mutex<PoolContext<L>>>,
     epoch: Arc<atomic::AtomicUsize>,
-    exit: Arc<atomic::AtomicBool>,
+    exit: Arc<atomic::AtomicUsize>,
     poll: Arc<mio::Poll>,
 }
 
@@ -179,7 +183,7 @@ where
             })),
             epoch: Arc::new(atomic::AtomicUsize::new(1)),
             poll: Arc::new(poll),
-            exit: Arc::new(atomic::AtomicBool::new(false)),
+            exit: Arc::new(atomic::AtomicUsize::new(NO_EXIT)),
         })
     }
 
@@ -214,7 +218,7 @@ where
 /// See `PoolHandle::terminate` and `PoolHandle::wait` for details.
 pub struct PoolHandle<R> {
     threads: Vec<thread::JoinHandle<R>>,
-    exit: Arc<atomic::AtomicBool>,
+    exit: Arc<atomic::AtomicUsize>,
 }
 
 impl<R> PoolHandle<R> {
@@ -223,7 +227,19 @@ impl<R> PoolHandle<R> {
     /// Note that this will *not* wait for existing connections to terminate, but termination may
     /// be delayed until the next time each worker is idle.
     pub fn terminate(self) -> Vec<thread::Result<R>> {
-        self.exit.store(true, atomic::Ordering::SeqCst);
+        self.exit.store(EXIT_IMMEDIATE, atomic::Ordering::SeqCst);
+        self.wait()
+    }
+
+    /// Stop accepting connections and wait for existing connections to complete.
+    ///
+    /// This method will tell worker threads not to accept new connetions, and to exit once all
+    /// current connections have been closed.
+    ///
+    /// Note that this method will *not* immediately drop the Listener, so new clients that try to
+    /// connect will hang (i.e., not get a connection refused) until the workers have all exited.
+    pub fn finish(self) -> Vec<thread::Result<R>> {
+        self.exit.store(EXIT_EVENTUALLY, atomic::Ordering::SeqCst);
         self.wait()
     }
 
@@ -257,8 +273,9 @@ where
     thread::spawn(move || {
         let mut worker_result = R::default();
         let mut events = mio::Events::with_capacity(1);
-        while !exit.load(atomic::Ordering::SeqCst) {
-            if let Err(e) = poll.poll(&mut events, Some(Duration::from_secs(1))) {
+        let mut status = NO_EXIT;
+        while status != EXIT_IMMEDIATE {
+            if let Err(e) = poll.poll(&mut events, Some(Duration::from_millis(200))) {
                 if e.kind() == io::ErrorKind::Interrupted {
                     // spurious wakeup
                     continue;
@@ -269,6 +286,8 @@ where
                     panic!("{}", e);
                 }
             }
+
+            status = exit.load(atomic::Ordering::SeqCst);
 
             // check our epoch -- we may have a stale truth.
             // this is important: consider the case where an old connection has been dropped,
@@ -282,47 +301,55 @@ where
             // *before* we polled (which is guaranteed by the atomic read), we know that the truth
             // we end up reading if the epoch has changed must at least contain any changes to t.
             let cur_epoch = epoch.load(atomic::Ordering::SeqCst);
-            if cur_epoch != cache_epoch {
+            if cur_epoch != cache_epoch
+                || (status == EXIT_EVENTUALLY && cache.token_to_conn.is_empty())
+            {
                 let truth = truth.lock().unwrap();
                 cache_epoch = epoch.load(atomic::Ordering::SeqCst);
                 cache = truth.clone();
+
+                if status == EXIT_EVENTUALLY && truth.token_to_conn.is_empty() {
+                    break;
+                }
             }
 
             for e in &events {
                 let Token(t) = e.token();
 
                 if t == 0 {
-                    let mut truth = truth.lock().unwrap();
+                    if status == NO_EXIT {
+                        let mut truth = truth.lock().unwrap();
 
-                    // let's assume we accept at least one connection
-                    cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
+                        // let's assume we accept at least one connection
+                        cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
 
-                    while let Ok(c) = cache.listener.accept() {
-                        let c = Arc::new(c);
+                        while let Ok(c) = cache.listener.accept() {
+                            let c = Arc::new(c);
 
-                        // pick a token for this new connection
-                        let token = truth.token_to_conn.insert(Arc::clone(&c));
+                            // pick a token for this new connection
+                            let token = truth.token_to_conn.insert(Arc::clone(&c));
 
-                        // it's fine if some other thread gets notified about this, because they'll
-                        // see the updated epoch, and then block trying to update their truth.
-                        poll.register(
-                            &*c,
-                            Token(token + 1),
+                            // it's fine if some other thread gets notified about this, because they'll
+                            // see the updated epoch, and then block trying to update their truth.
+                            poll.register(
+                                &*c,
+                                Token(token + 1),
+                                Ready::readable(),
+                                PollOpt::level() | PollOpt::oneshot(),
+                            ).unwrap();
+
+                            // also update our cache while we're at it
+                            cache = truth.clone();
+                        }
+
+                        // need to re-register listening thread
+                        poll.reregister(
+                            &*cache.listener,
+                            Token(0),
                             Ready::readable(),
                             PollOpt::level() | PollOpt::oneshot(),
-                        ).unwrap();
-
-                        // also update our cache while we're at it
-                        cache = truth.clone();
+                        ).unwrap()
                     }
-
-                    // need to re-register listening thread
-                    poll.reregister(
-                        &*cache.listener,
-                        Token(0),
-                        Ready::readable(),
-                        PollOpt::level() | PollOpt::oneshot(),
-                    ).unwrap()
                 } else {
                     let t = t - 1;
                     let mut closed = false;
