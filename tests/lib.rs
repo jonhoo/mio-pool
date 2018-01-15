@@ -316,7 +316,8 @@ fn many_workers() {
         Ok(false)
     });
 
-    let cs: Vec<_> = (0..50)
+    let n = 50;
+    let cs: Vec<_> = (0..n)
         .map(|_| {
             use std::thread;
             thread::spawn(move || {
@@ -335,13 +336,15 @@ fn many_workers() {
 
     let r = h.terminate();
     assert_eq!(r.len(), 10);
+    let mut nr = 0;
     for r in r {
         let r = r.unwrap();
-        assert!(!r.is_empty());
         let mut r = &r[..];
         while !r.is_empty() {
             assert!(r.starts_with(b"hello world"));
             r = &r[b"hello world".len()..];
+            nr += 1;
         }
     }
+    assert_eq!(nr, n);
 }
