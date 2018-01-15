@@ -225,15 +225,12 @@ where
         })
     }
 
-    /// Start accepting and handling connections using this pool.
+    /// Run the pool with a custom adapter for every newly accepted connection.
     ///
-    /// The pool will consist of `workers` worker threads that each accept new connections and
-    /// handle requests arriving at existing ones. Every time a connection has available data,
-    /// `on_ready` will be called by one of the workers. A connection will stay in the pool until
-    /// `on_ready` returns an error, or `Ok(true)` indicating EOF.
-    ///
-    /// Each worker also has local state of type `R`. This state can be mutated by `on_ready`, and
-    /// is returned when the pool exits.
+    /// This method behaves the same as `PoolBuilder::run`, except that a function for adapting
+    /// accepted connections before using them can also be specified. This allows users to wrap
+    /// something akin to an `TcpStream` into a more sophisticated connection type (e.g., by adding
+    /// buffering).
     pub fn run_with_adapter<A, C, F, R>(
         self,
         workers: usize,
