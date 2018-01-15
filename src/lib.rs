@@ -123,7 +123,7 @@ where
 /// themselves mio-pollable.
 pub trait Listener: Evented + Sync + Send {
     /// The type of connections yielded by `accept`.
-    type Connection: Evented + Sync + Send;
+    type Connection: Evented + Send;
 
     /// Accept a new connection.
     ///
@@ -194,9 +194,12 @@ where
     C: Send,
 {
 }
+
+// This is *only* okay because no two threads should ever be referencing a given connection at the
+// same time.
 unsafe impl<C> Sync for OneshotConnection<C>
 where
-    C: Sync,
+    C: Send,
 {
 }
 
@@ -239,7 +242,7 @@ where
     ) -> PoolHandle<R>
     where
         A: Fn(L::Connection) -> C + 'static + Send + Sync,
-        C: Evented + Sync + Send + 'static,
+        C: Evented + Send + 'static,
         F: Fn(&mut C, &mut R) -> io::Result<bool> + 'static + Send + Sync,
         R: 'static + Default + Send,
     {
@@ -331,7 +334,7 @@ fn worker_main<A, C, L, F, R>(
 ) -> thread::JoinHandle<R>
 where
     A: Fn(L::Connection) -> C + 'static + Send + Sync,
-    C: Evented + Sync + Send + 'static,
+    C: Evented + Send + 'static,
     L: 'static + Listener,
     F: Fn(&mut C, &mut R) -> io::Result<bool> + 'static + Send + Sync,
     R: 'static + Default + Send,
