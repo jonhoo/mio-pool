@@ -1,7 +1,23 @@
 [package]
 name = "mio-pool"
 version = "0.1.0"
+
+description = "A worker pool collectively handling a set of connections"
+readme = "README.md"
+
 authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
+
+documentation = "https://docs.rs/mio-pool"
+homepage = "https://github.com/jonhoo/mio-pool"
+repository = "https://github.com/jonhoo/mio-pool.git"
+
+keywords = ["worker-pool", "mio", "io", "networking"]
+categories = ["concurrency", "asynchronous", "network-programming"]
+
+license = "MIT/Apache-2.0"
+
+[badges]
+travis-ci = { repository = "jonhoo/mio-pool" }
 
 [dependencies]
 mio = "0.6"
