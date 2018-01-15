@@ -115,7 +115,7 @@ where
     let truth = Arc::clone(&pool.truth);
     let mut cache = {
         let truth = pool.truth.lock().unwrap();
-        cache_epoch = pool.epoch.load(atomic::Ordering::Acquire);
+        cache_epoch = pool.epoch.load(atomic::Ordering::SeqCst);
         truth.clone()
     };
     let poll = Arc::clone(&pool.poll);
@@ -149,10 +149,10 @@ where
             // operating on the token we get from poll(), and so as long as we see any changes from
             // *before* we polled (which is guaranteed by the atomic read), we know that the truth
             // we end up reading if the epoch has changed must at least contain any changes to t.
-            let cur_epoch = epoch.load(atomic::Ordering::Acquire);
+            let cur_epoch = epoch.load(atomic::Ordering::SeqCst);
             if cur_epoch != cache_epoch {
                 let truth = truth.lock().unwrap();
-                cache_epoch = epoch.load(atomic::Ordering::Acquire);
+                cache_epoch = epoch.load(atomic::Ordering::SeqCst);
                 cache = truth.clone();
             }
 
@@ -163,7 +163,7 @@ where
                     let mut truth = truth.lock().unwrap();
 
                     // let's assume we accept at least one connection
-                    cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::AcqRel);
+                    cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
 
                     while let Ok(c) = cache.acceptor.accept() {
                         let c = Arc::new(c);
@@ -216,7 +216,7 @@ where
                             if closed {
                                 // connection was dropped; update truth
                                 let mut truth = truth.lock().unwrap();
-                                cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::AcqRel);
+                                cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
                                 truth.token_to_conn.remove(t);
                                 // also update our cache while we're at it
                                 cache = truth.clone(); // yay nll
