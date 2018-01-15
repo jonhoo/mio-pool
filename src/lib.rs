@@ -22,7 +22,7 @@
 //! let server = mio::net::TcpListener::bind(&addr).unwrap();
 //! let addr = server.local_addr().unwrap();
 //! let pool = PoolBuilder::from(server).unwrap();
-//! let h = pool.run(1 /* # workers */, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
+//! let h = pool.run(1 /* # workers */, |c: &mut mio::net::TcpStream, s: &mut Vec<u8>| {
 //!     // new data is available on the connection `c`!
 //!     let mut buf = [0u8; 1024];
 //!
@@ -87,7 +87,7 @@ const EXIT_EVENTUALLY: usize = 2;
 /// let addr = "127.0.0.1:0".parse().unwrap();
 /// let server = mio::net::TcpListener::bind(&addr).unwrap();
 /// let pool = PoolBuilder::from(server).unwrap();
-/// let h = pool.run(1 /* # workers */, |mut c: &mio::net::TcpStream, s: &mut ()| {
+/// let h = pool.run(1 /* # workers */, |c: &mut mio::net::TcpStream, s: &mut ()| {
 ///     use std::io::prelude::*;
 ///     let mut buf = [0u8; 1024];
 ///     let n = c.read(&mut buf)?;
@@ -124,7 +124,7 @@ where
     L: Listener,
 {
     listener: Arc<L>,
-    token_to_conn: Slab<Arc<L::Connection>>,
+    token_to_conn: Slab<Arc<OneshotConnection<L::Connection>>>,
 }
 
 impl<L> Clone for PoolContext<L>
@@ -157,6 +157,67 @@ impl Listener for net::TcpListener {
     fn accept(&self) -> io::Result<Self::Connection> {
         self.accept().map(|(c, _)| c)
     }
+}
+
+/// This is a bit of a hack, but allows mutable access to the underlying channels.
+///
+/// Specifically, since EPOLL_ONESHOT (should) guarantee that only one thread is woken up when
+/// there's an event on a given socket, and we ensure that no thread touches a connection after it
+/// re-registers it, we know that a thread that is woken up for a given connection has exclusive
+/// access to that connection. This means that we are okay to hand out an `&mut C` to the
+/// `on_ready` function, since it cannot leak that mutable reference anywhere.
+struct OneshotConnection<C>(Arc<C>, *mut C);
+
+impl<C> Evented for OneshotConnection<C>
+where
+    C: Evented,
+{
+    fn register(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
+        self.0.register(poll, token, interest, opts)
+    }
+
+    fn reregister(
+        &self,
+        poll: &Poll,
+        token: Token,
+        interest: Ready,
+        opts: PollOpt,
+    ) -> io::Result<()> {
+        self.0.reregister(poll, token, interest, opts)
+    }
+
+    fn deregister(&self, poll: &Poll) -> io::Result<()> {
+        self.0.deregister(poll)
+    }
+}
+
+impl<C> OneshotConnection<C> {
+    pub fn new(conn: C) -> Self {
+        let mut conn = Arc::new(conn);
+        let c = { Arc::get_mut(&mut conn).unwrap() as *mut _ };
+        OneshotConnection(conn, c)
+    }
+
+    unsafe fn mut_given_epoll_oneshot<'a>(&'a self) -> &'a mut C {
+        &mut *self.1
+    }
+}
+
+unsafe impl<C> Send for OneshotConnection<C>
+where
+    C: Send,
+{
+}
+unsafe impl<C> Sync for OneshotConnection<C>
+where
+    C: Sync,
+{
 }
 
 impl<L> PoolBuilder<L>
@@ -198,7 +259,7 @@ where
     /// is returned when the pool exits.
     pub fn run<F, R>(self, workers: usize, on_ready: F) -> PoolHandle<R>
     where
-        F: Fn(&L::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
+        F: Fn(&mut L::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
         R: 'static + Default + Send,
     {
         let on_ready = Arc::new(on_ready);
@@ -256,7 +317,7 @@ impl<R> PoolHandle<R> {
 fn worker_main<L, F, R>(_i: usize, pool: &PoolBuilder<L>, on_ready: Arc<F>) -> thread::JoinHandle<R>
 where
     L: 'static + Listener,
-    F: Fn(&L::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
+    F: Fn(&mut L::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
     R: 'static + Default + Send,
 {
     let mut cache_epoch;
@@ -324,7 +385,7 @@ where
                         cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
 
                         while let Ok(c) = cache.listener.accept() {
-                            let c = Arc::new(c);
+                            let c = Arc::new(OneshotConnection::new(c));
 
                             // pick a token for this new connection
                             let token = truth.token_to_conn.insert(Arc::clone(&c));
@@ -354,7 +415,10 @@ where
                     let t = t - 1;
                     let mut closed = false;
                     if let Some(c) = cache.token_to_conn.get(t) {
-                        let r = on_ready(&**c, &mut worker_result);
+                        let r = {
+                            let c = unsafe { c.mut_given_epoll_oneshot() };
+                            on_ready(c, &mut worker_result)
+                        };
                         if let Ok(true) = r {
                             closed = true;
                         }

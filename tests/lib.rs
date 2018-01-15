@@ -11,7 +11,7 @@ fn one_client() {
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(1, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
+    let h = pool.run(1, |c: &mut mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
@@ -38,7 +38,7 @@ fn soft_exit_no_clients() {
     let addr = "127.0.0.1:0".parse().unwrap();
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(2, |mut c: &mio::net::TcpStream, _: &mut ()| {
+    let h = pool.run(2, |c: &mut mio::net::TcpStream, _: &mut ()| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
@@ -60,7 +60,7 @@ fn soft_exit_one_client() {
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(2, |mut c: &mio::net::TcpStream, _: &mut ()| {
+    let h = pool.run(2, |c: &mut mio::net::TcpStream, _: &mut ()| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
@@ -84,7 +84,7 @@ fn soft_exit_many_client() {
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(2, |mut c: &mio::net::TcpStream, _: &mut ()| {
+    let h = pool.run(2, |c: &mut mio::net::TcpStream, _: &mut ()| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
@@ -113,7 +113,7 @@ fn soft_exit_no_new() {
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(2, |mut c: &mio::net::TcpStream, _: &mut ()| {
+    let h = pool.run(2, |c: &mut mio::net::TcpStream, _: &mut ()| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
@@ -196,7 +196,7 @@ fn multi_rtt() {
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(1, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
+    let h = pool.run(1, |c: &mut mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
@@ -230,7 +230,7 @@ fn client_churn() {
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(1, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
+    let h = pool.run(1, |c: &mut mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
@@ -266,7 +266,7 @@ fn client_churn_two_workers() {
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(2, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
+    let h = pool.run(2, |c: &mut mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
@@ -304,7 +304,7 @@ fn many_workers() {
     let server = mio::net::TcpListener::bind(&addr).unwrap();
     let addr = server.local_addr().unwrap();
     let pool = PoolBuilder::from(server).unwrap();
-    let h = pool.run(10, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
+    let h = pool.run(10, |c: &mut mio::net::TcpStream, s: &mut Vec<u8>| {
         let mut buf = [0u8; 1024];
         let n = c.read(&mut buf)?;
         if n == 0 {
