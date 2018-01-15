@@ -192,7 +192,8 @@ where
                         PollOpt::level() | PollOpt::oneshot(),
                     ).unwrap()
                 } else {
-                    match cache.token_to_conn.get(t - 1) {
+                    let t = t - 1;
+                    match cache.token_to_conn.get(t) {
                         Some(c) => {
                             let r = on_ready(&**c, &mut worker_result);
                             let mut closed = false;
@@ -223,7 +224,7 @@ where
                                 // need to re-register so we get later events
                                 poll.reregister(
                                     &**c,
-                                    Token(t),
+                                    Token(t + 1),
                                     Ready::readable(),
                                     PollOpt::level() | PollOpt::oneshot(),
                                 ).unwrap()
