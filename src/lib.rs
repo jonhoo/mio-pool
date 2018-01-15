@@ -183,6 +183,14 @@ where
                         // also update our cache while we're at it
                         cache = truth.clone();
                     }
+
+                    // need to re-register listening thread
+                    poll.reregister(
+                        &*cache.acceptor,
+                        Token(0),
+                        Ready::readable(),
+                        PollOpt::level() | PollOpt::oneshot(),
+                    ).unwrap()
                 } else {
                     match cache.token_to_conn.get(t - 1) {
                         Some(c) => {
