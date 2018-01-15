@@ -57,7 +57,6 @@
 //! # }
 //! ```
 #![deny(missing_docs)]
-#![feature(nll)]
 
 extern crate mio;
 extern crate slab;
@@ -326,48 +325,47 @@ where
                     ).unwrap()
                 } else {
                     let t = t - 1;
-                    match cache.token_to_conn.get(t) {
-                        Some(c) => {
-                            let r = on_ready(&**c, &mut worker_result);
-                            let mut closed = false;
-                            if let Ok(true) = r {
-                                closed = true;
-                            }
-                            if let Err(e) = r {
-                                match e.kind() {
-                                    io::ErrorKind::BrokenPipe
-                                    | io::ErrorKind::NotConnected
-                                    | io::ErrorKind::UnexpectedEof
-                                    | io::ErrorKind::ConnectionAborted
-                                    | io::ErrorKind::ConnectionReset => {
-                                        closed = true;
-                                    }
-                                    _ => {}
+                    let mut closed = false;
+                    if let Some(c) = cache.token_to_conn.get(t) {
+                        let r = on_ready(&**c, &mut worker_result);
+                        if let Ok(true) = r {
+                            closed = true;
+                        }
+                        if let Err(e) = r {
+                            match e.kind() {
+                                io::ErrorKind::BrokenPipe
+                                | io::ErrorKind::NotConnected
+                                | io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionAborted
+                                | io::ErrorKind::ConnectionReset => {
+                                    closed = true;
                                 }
+                                _ => {}
                             }
+                        }
 
-                            if closed {
-                                // connection was dropped; update truth
-                                let mut truth = truth.lock().unwrap();
-                                cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
-                                truth.token_to_conn.remove(t);
-                                // also update our cache while we're at it
-                                cache = truth.clone(); // yay nll
-                            } else {
-                                // need to re-register so we get later events
-                                poll.reregister(
-                                    &**c,
-                                    Token(t + 1),
-                                    Ready::readable(),
-                                    PollOpt::level() | PollOpt::oneshot(),
-                                ).unwrap()
-                            }
+                        if !closed {
+                            // need to re-register so we get later events
+                            poll.reregister(
+                                &**c,
+                                Token(t + 1),
+                                Ready::readable(),
+                                PollOpt::level() | PollOpt::oneshot(),
+                            ).unwrap()
                         }
-                        None => {
-                            // mio is waking us up on a connection that has been dropped?
-                            // this shouldn't happen, but does....
-                            //unreachable!();
-                        }
+                    } else {
+                        // mio is waking us up on a connection that has been dropped?
+                        // this shouldn't happen, but does....
+                        //unreachable!();
+                    }
+
+                    if closed {
+                        // connection was dropped; update truth
+                        let mut truth = truth.lock().unwrap();
+                        cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
+                        truth.token_to_conn.remove(t);
+                        // also update our cache while we're at it
+                        cache = truth.clone();
                     }
                 }
             }
