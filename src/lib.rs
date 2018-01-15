@@ -231,7 +231,9 @@ where
                             }
                         }
                         None => {
-                            unreachable!();
+                            // mio is waking us up on a connection that has been dropped?
+                            // this shouldn't happen, but does....
+                            //unreachable!();
                         }
                     }
                 }
