@@ -113,30 +113,10 @@ pub struct PoolBuilder<L>
 where
     L: Listener,
 {
-    truth: Arc<Mutex<PoolContext<L>>>,
+    listener: Arc<L>,
     epoch: Arc<atomic::AtomicUsize>,
     exit: Arc<atomic::AtomicUsize>,
     poll: Arc<Poll>,
-}
-
-struct PoolContext<L>
-where
-    L: Listener,
-{
-    listener: Arc<L>,
-    token_to_conn: Slab<Arc<OneshotConnection<L::Connection>>>,
-}
-
-impl<L> Clone for PoolContext<L>
-where
-    L: Listener,
-{
-    fn clone(&self) -> Self {
-        PoolContext {
-            listener: Arc::clone(&self.listener),
-            token_to_conn: self.token_to_conn.clone(),
-        }
-    }
 }
 
 /// Types that implement `Listener` are mio-pollable, and can accept new connections that are
@@ -238,14 +218,52 @@ where
         )?;
 
         Ok(PoolBuilder {
-            truth: Arc::new(Mutex::new(PoolContext {
-                listener: Arc::new(listener),
-                token_to_conn: Slab::new(),
-            })),
+            listener: Arc::new(listener),
             epoch: Arc::new(atomic::AtomicUsize::new(1)),
             poll: Arc::new(poll),
             exit: Arc::new(atomic::AtomicUsize::new(NO_EXIT)),
         })
+    }
+
+    /// Start accepting and handling connections using this pool.
+    ///
+    /// The pool will consist of `workers` worker threads that each accept new connections and
+    /// handle requests arriving at existing ones. Every time a connection has available data,
+    /// `on_ready` will be called by one of the workers. A connection will stay in the pool until
+    /// `on_ready` returns an error, or `Ok(true)` indicating EOF.
+    ///
+    /// Each worker also has local state of type `R`. This state can be mutated by `on_ready`, and
+    /// is returned when the pool exits.
+    pub fn run_with_adapter<A, C, F, R>(
+        self,
+        workers: usize,
+        adapter: A,
+        on_ready: F,
+    ) -> PoolHandle<R>
+    where
+        A: Fn(L::Connection) -> C + 'static + Send + Sync,
+        C: Evented + Sync + Send + 'static,
+        F: Fn(&mut C, &mut R) -> io::Result<bool> + 'static + Send + Sync,
+        R: 'static + Default + Send,
+    {
+        let truth = Arc::new(Mutex::new(Slab::new()));
+        let adapter = Arc::new(adapter);
+        let on_ready = Arc::new(on_ready);
+        let wrkrs: Vec<_> = (0..workers)
+            .map(|i| {
+                worker_main(
+                    i,
+                    &self,
+                    Arc::clone(&truth),
+                    Arc::clone(&adapter),
+                    Arc::clone(&on_ready),
+                )
+            })
+            .collect();
+        PoolHandle {
+            threads: wrkrs,
+            exit: self.exit,
+        }
     }
 
     /// Start accepting and handling connections using this pool.
@@ -262,14 +280,7 @@ where
         F: Fn(&mut L::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
         R: 'static + Default + Send,
     {
-        let on_ready = Arc::new(on_ready);
-        let wrkrs: Vec<_> = (0..workers)
-            .map(|i| worker_main(i, &self, Arc::clone(&on_ready)))
-            .collect();
-        PoolHandle {
-            threads: wrkrs,
-            exit: self.exit,
-        }
+        self.run_with_adapter(workers, |c| c, on_ready)
     }
 }
 
@@ -314,16 +325,24 @@ impl<R> PoolHandle<R> {
     }
 }
 
-fn worker_main<L, F, R>(_i: usize, pool: &PoolBuilder<L>, on_ready: Arc<F>) -> thread::JoinHandle<R>
+fn worker_main<A, C, L, F, R>(
+    _i: usize,
+    pool: &PoolBuilder<L>,
+    truth: Arc<Mutex<Slab<Arc<OneshotConnection<C>>>>>,
+    adapter: Arc<A>,
+    on_ready: Arc<F>,
+) -> thread::JoinHandle<R>
 where
+    A: Fn(L::Connection) -> C + 'static + Send + Sync,
+    C: Evented + Sync + Send + 'static,
     L: 'static + Listener,
-    F: Fn(&mut L::Connection, &mut R) -> io::Result<bool> + 'static + Send + Sync,
+    F: Fn(&mut C, &mut R) -> io::Result<bool> + 'static + Send + Sync,
     R: 'static + Default + Send,
 {
     let mut cache_epoch;
-    let truth = Arc::clone(&pool.truth);
+    let listener = Arc::clone(&pool.listener);
     let mut cache = {
-        let truth = pool.truth.lock().unwrap();
+        let truth = truth.lock().unwrap();
         cache_epoch = pool.epoch.load(atomic::Ordering::SeqCst);
         truth.clone()
     };
@@ -362,14 +381,12 @@ where
             // *before* we polled (which is guaranteed by the atomic read), we know that the truth
             // we end up reading if the epoch has changed must at least contain any changes to t.
             let cur_epoch = epoch.load(atomic::Ordering::SeqCst);
-            if cur_epoch != cache_epoch
-                || (status == EXIT_EVENTUALLY && cache.token_to_conn.is_empty())
-            {
+            if cur_epoch != cache_epoch || (status == EXIT_EVENTUALLY && cache.is_empty()) {
                 let truth = truth.lock().unwrap();
                 cache_epoch = epoch.load(atomic::Ordering::SeqCst);
                 cache = truth.clone();
 
-                if status == EXIT_EVENTUALLY && truth.token_to_conn.is_empty() {
+                if status == EXIT_EVENTUALLY && truth.is_empty() {
                     break;
                 }
             }
@@ -384,11 +401,12 @@ where
                         // let's assume we accept at least one connection
                         cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
 
-                        while let Ok(c) = cache.listener.accept() {
+                        while let Ok(c) = listener.accept() {
+                            let c = adapter(c);
                             let c = Arc::new(OneshotConnection::new(c));
 
                             // pick a token for this new connection
-                            let token = truth.token_to_conn.insert(Arc::clone(&c));
+                            let token = truth.insert(Arc::clone(&c));
 
                             // it's fine if some other thread gets notified about this, because they'll
                             // see the updated epoch, and then block trying to update their truth.
@@ -405,7 +423,7 @@ where
 
                         // need to re-register listening thread
                         poll.reregister(
-                            &*cache.listener,
+                            &*listener,
                             Token(0),
                             Ready::readable(),
                             PollOpt::level() | PollOpt::oneshot(),
@@ -414,7 +432,7 @@ where
                 } else {
                     let t = t - 1;
                     let mut closed = false;
-                    if let Some(c) = cache.token_to_conn.get(t) {
+                    if let Some(c) = cache.get(t) {
                         let r = {
                             let c = unsafe { c.mut_given_epoll_oneshot() };
                             on_ready(c, &mut worker_result)
@@ -454,7 +472,7 @@ where
                         // connection was dropped; update truth
                         let mut truth = truth.lock().unwrap();
                         cache_epoch = 1 + epoch.fetch_add(1, atomic::Ordering::SeqCst);
-                        truth.token_to_conn.remove(t);
+                        truth.remove(t);
                         // also update our cache while we're at it
                         cache = truth.clone();
                     }
