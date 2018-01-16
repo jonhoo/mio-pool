@@ -24,23 +24,24 @@ let addr = "127.0.0.1:0".parse().unwrap();
 let server = mio::net::TcpListener::bind(&addr).unwrap();
 let addr = server.local_addr().unwrap();
 let pool = PoolBuilder::from(server).unwrap();
-let h = pool.run(1 /* # workers */, |mut c: &mio::net::TcpStream, s: &mut Vec<u8>| {
-    // new data is available on the connection `c`!
-    let mut buf = [0u8; 1024];
+let h = pool.and_return(|v| v)
+    .run(1 /* # workers */, |c: &mut mio::net::TcpStream, s: &mut Vec<u8>| {
+        // new data is available on the connection `c`!
+        let mut buf = [0u8; 1024];
 
-    // let's just echo back what we read
-    let n = c.read(&mut buf)?;
-    if n == 0 {
-        return Ok(true);
-    }
-    c.write_all(&buf[..n])?;
+        // let's just echo back what we read
+        let n = c.read(&mut buf)?;
+        if n == 0 {
+            return Ok(true);
+        }
+        c.write_all(&buf[..n])?;
 
-    // keep some internal state
-    s.extend(&buf[..n]);
+        // keep some internal state
+        s.extend(&buf[..n]);
 
-    // assume there could be more data
-    Ok(false)
-});
+        // assume there could be more data
+        Ok(false)
+    });
 
 // new clients can now connect on `addr`
 use std::net::TcpStream;
