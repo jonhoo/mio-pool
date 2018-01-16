@@ -130,9 +130,9 @@ where
                             poll.reregister(&**c, Token(t + 1)).unwrap();
                         }
                     } else {
-                        // mio is waking us up on a connection that has been dropped?
-                        // this shouldn't happen, but does....
-                        //unreachable!();
+                        // we're being woken up on a connection that has been dropped?
+                        // this shouldn't happen...
+                        unreachable!();
                     }
 
                     if closed {
