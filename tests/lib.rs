@@ -53,7 +53,7 @@ fn soft_exit_no_clients() {
     let r = h.finish();
     assert_eq!(r.len(), 2);
     for r in r {
-        assert!(r.is_ok());
+        r.unwrap();
     }
 }
 
@@ -77,7 +77,7 @@ fn soft_exit_one_client() {
     let r = h.finish();
     assert_eq!(r.len(), 2);
     for r in r {
-        assert!(r.is_ok());
+        r.unwrap();
     }
 }
 
@@ -106,7 +106,7 @@ fn soft_exit_many_client() {
     let r = h.finish();
     assert_eq!(r.len(), 2);
     for r in r {
-        assert!(r.is_ok());
+        r.unwrap();
     }
 }
 
@@ -139,7 +139,7 @@ fn soft_exit_no_new() {
         d.store(true, atomic::Ordering::SeqCst);
         assert_eq!(r.len(), 2);
         for r in r {
-            assert!(r.is_ok());
+            r.unwrap();
         }
     });
 
@@ -173,7 +173,7 @@ fn soft_exit_no_new() {
     thread::sleep(time::Duration::from_millis(500));
 
     // at this point, `c` should still be active (and work correctly)
-    assert!(c.write_all(&[0x00]).is_ok());
+    c.write_all(&[0x00]).unwrap();
     let mut buf = [0];
     assert_eq!(c.read(&mut buf[..]).unwrap(), 1);
     // finish should therefore not yet have returned
