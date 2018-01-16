@@ -1,10 +1,11 @@
 use std::io;
 use std::sync::{atomic, Arc, Mutex};
-use mio::*;
 use slab::Slab;
+use std::os::unix::io::AsRawFd;
 
 use {Listener, PoolHandle, NO_EXIT};
 use worker::worker_main;
+use poll::{Poll, Token};
 
 /// Used to configure a mio pool before launching it.
 ///
@@ -80,12 +81,7 @@ where
     /// accepting them, and handling requests to accepted connections, among a pool of threads.
     pub fn from(listener: L) -> io::Result<Self> {
         let poll = Poll::new()?;
-        poll.register(
-            &listener,
-            Token(0),
-            Ready::readable(),
-            PollOpt::level() | PollOpt::oneshot(),
-        )?;
+        poll.register(&listener, Token(0))?;
 
         Ok(PoolBuilder {
             listener: Arc::new(listener),
@@ -135,7 +131,7 @@ where
     pub fn with_adapter<NA, NC>(self, adapter: NA) -> PoolBuilder<L, NC, S, R>
     where
         NA: Fn(L::Connection) -> NC + 'static + Send + Sync,
-        NC: Evented + Send + 'static,
+        NC: AsRawFd + Send + 'static,
     {
         PoolBuilder {
             listener: self.listener,
@@ -173,7 +169,7 @@ where
 impl<L, C> PoolBuilder<L, C, (), ()>
 where
     L: Listener + 'static,
-    C: Evented + Send + 'static,
+    C: AsRawFd + Send + 'static,
 {
     /// Run the pool with a stateless worker callback.
     pub fn run_stateless<E>(self, workers: usize, on_ready: E) -> PoolHandle<()>
@@ -187,7 +183,7 @@ where
 impl<L, C, S, R> PoolBuilder<L, C, S, R>
 where
     L: Listener + 'static,
-    C: Evented + Send + 'static,
+    C: AsRawFd + Send + 'static,
     S: Clone + Send + 'static,
     R: 'static + Send,
 {

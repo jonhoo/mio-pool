@@ -65,21 +65,22 @@ extern crate slab;
 use std::io;
 use std::thread;
 use std::sync::{atomic, Arc};
-use mio::*;
+use std::os::unix::io::AsRawFd;
 
 pub(crate) const NO_EXIT: usize = 0;
 pub(crate) const EXIT_IMMEDIATE: usize = 1;
 pub(crate) const EXIT_EVENTUALLY: usize = 2;
 
+pub(crate) mod poll;
 mod builder;
 pub use builder::PoolBuilder;
 pub(crate) mod worker;
 
 /// Types that implement `Listener` are mio-pollable, and can accept new connections that are
 /// themselves mio-pollable.
-pub trait Listener: Evented + Sync + Send {
+pub trait Listener: AsRawFd + Sync + Send {
     /// The type of connections yielded by `accept`.
-    type Connection: Evented + Send;
+    type Connection: AsRawFd + Send;
 
     /// Accept a new connection.
     ///
@@ -88,8 +89,8 @@ pub trait Listener: Evented + Sync + Send {
     fn accept(&self) -> io::Result<Self::Connection>;
 }
 
-impl Listener for net::TcpListener {
-    type Connection = net::TcpStream;
+impl Listener for mio::net::TcpListener {
+    type Connection = mio::net::TcpStream;
     fn accept(&self) -> io::Result<Self::Connection> {
         self.accept().map(|(c, _)| c)
     }

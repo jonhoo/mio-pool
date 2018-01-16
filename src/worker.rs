@@ -2,8 +2,8 @@ use std::io;
 use std::thread;
 use std::time::Duration;
 use std::sync::{atomic, Arc, Mutex};
-use mio::*;
 use slab::Slab;
+use poll::{Events, Token};
 
 use {EXIT_EVENTUALLY, EXIT_IMMEDIATE, NO_EXIT};
 use {Listener, PoolBuilder};
@@ -16,7 +16,7 @@ pub(crate) fn worker_main<L, C, S, R, E>(
 ) -> thread::JoinHandle<R>
 where
     L: 'static + Listener,
-    C: Evented + Send + 'static,
+    C: AsRawFd + Send + 'static,
     S: Clone + Send + 'static,
     R: 'static + Send,
     E: Fn(&mut C, &mut S) -> io::Result<bool> + 'static + Send + Sync,
@@ -75,9 +75,7 @@ where
                 }
             }
 
-            for e in &events {
-                let Token(t) = e.token();
-
+            for Token(t) in &events {
                 if t == 0 {
                     if status == NO_EXIT {
                         let mut truth = truth.lock().unwrap();
@@ -94,24 +92,14 @@ where
 
                             // it's fine if some other thread gets notified about this, because they'll
                             // see the updated epoch, and then block trying to update their truth.
-                            poll.register(
-                                &*c,
-                                Token(token + 1),
-                                Ready::readable(),
-                                PollOpt::level() | PollOpt::oneshot(),
-                            ).unwrap();
+                            poll.register(&*c, Token(token + 1)).unwrap();
 
                             // also update our cache while we're at it
                             cache = truth.clone();
                         }
 
                         // need to re-register listening thread
-                        poll.reregister(
-                            &*listener,
-                            Token(0),
-                            Ready::readable(),
-                            PollOpt::level() | PollOpt::oneshot(),
-                        ).unwrap()
+                        poll.reregister(&*listener, Token(0)).unwrap();
                     }
                 } else {
                     let t = t - 1;
@@ -139,12 +127,7 @@ where
 
                         if !closed {
                             // need to re-register so we get later events
-                            poll.reregister(
-                                &**c,
-                                Token(t + 1),
-                                Ready::readable(),
-                                PollOpt::level() | PollOpt::oneshot(),
-                            ).unwrap()
+                            poll.reregister(&**c, Token(t + 1)).unwrap();
                         }
                     } else {
                         // mio is waking us up on a connection that has been dropped?
@@ -177,32 +160,13 @@ where
 /// `on_ready` function, since it cannot leak that mutable reference anywhere.
 pub(super) struct OneshotConnection<C>(Arc<C>, *mut C);
 
-impl<C> Evented for OneshotConnection<C>
+use std::os::unix::io::{AsRawFd, RawFd};
+impl<C> AsRawFd for OneshotConnection<C>
 where
-    C: Evented,
+    C: AsRawFd,
 {
-    fn register(
-        &self,
-        poll: &Poll,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> io::Result<()> {
-        self.0.register(poll, token, interest, opts)
-    }
-
-    fn reregister(
-        &self,
-        poll: &Poll,
-        token: Token,
-        interest: Ready,
-        opts: PollOpt,
-    ) -> io::Result<()> {
-        self.0.reregister(poll, token, interest, opts)
-    }
-
-    fn deregister(&self, poll: &Poll) -> io::Result<()> {
-        self.0.deregister(poll)
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
     }
 }
 
