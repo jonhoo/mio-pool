@@ -22,7 +22,7 @@
 //! let server = mio::net::TcpListener::bind(&addr).unwrap();
 //! let addr = server.local_addr().unwrap();
 //! let pool = PoolBuilder::from(server).unwrap();
-//! let h = pool.and_return(|v| v)
+//! let h = pool.with_state(Vec::new()).and_return(|v| v)
 //!     .run(1 /* # workers */, |c: &mut mio::net::TcpStream, s: &mut Vec<u8>| {
 //!         // new data is available on the connection `c`!
 //!         let mut buf = [0u8; 1024];

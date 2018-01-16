@@ -1,5 +1,4 @@
 use std::io;
-use std::marker::PhantomData;
 use std::sync::{atomic, Arc, Mutex};
 use mio::*;
 use slab::Slab;
@@ -24,12 +23,6 @@ use worker::worker_main;
 /// connection through a function before adding it to the connection pool. The latter allows for
 /// returning some part of the worker state after the pool has been terminated (e.g., for
 /// statistics summaries). See the relevant method documentation for more details.
-///
-/// The many definitions of `PoolBuilder::run` can seem a bit daunting at first. In practice, you
-/// should likely not need to worry about them; any way you construct the `PoolBuilder` *should*
-/// give you a builder that you can then call `run` on. The many implementations are there to
-/// ensure that you still get static dispatch for your pool no matter what combination of adapter
-/// and finalizer you choose.
 ///
 /// # Examples
 ///
@@ -63,18 +56,21 @@ use worker::worker_main;
 /// assert_eq!(result.unwrap(), ());
 /// # }
 /// ```
-pub struct PoolBuilder<L, A = (), S = (), F = ()> {
+pub struct PoolBuilder<L, C, S, R>
+where
+    L: Listener,
+{
     pub(super) listener: Arc<L>,
     pub(super) epoch: Arc<atomic::AtomicUsize>,
     pub(super) exit: Arc<atomic::AtomicUsize>,
     pub(super) poll: Arc<Poll>,
 
-    pub(super) state: PhantomData<S>,
-    pub(super) adapter: Arc<A>,
-    pub(super) finalizer: Arc<F>,
+    pub(super) initial: S,
+    pub(super) adapter: Arc<Fn(L::Connection) -> C + 'static + Send + Sync>,
+    pub(super) finalizer: Arc<Fn(S) -> R + Send + Sync + 'static>,
 }
 
-impl<L> PoolBuilder<L, (), (), ()>
+impl<L> PoolBuilder<L, L::Connection, (), ()>
 where
     L: Listener,
 {
@@ -97,46 +93,23 @@ where
             poll: Arc::new(poll),
             exit: Arc::new(atomic::AtomicUsize::new(NO_EXIT)),
 
-            state: PhantomData,
-            adapter: Arc::new(()),
-            finalizer: Arc::new(()),
+            initial: (),
+            adapter: Arc::new(|c| c),
+            finalizer: Arc::new(|_| ()),
         })
     }
 }
 
-impl<L, A, S, F> PoolBuilder<L, A, S, F>
+impl<L, C> PoolBuilder<L, C, (), ()>
 where
     L: Listener,
 {
-    /// Run accepted connections through an adapter before adding them to the pool of connections.
+    /// Set the initial state of each worker thread.
     ///
-    /// This allows users to wrap something akin to an `TcpStream` into a more sophisticated
-    /// connection type (e.g., by adding buffering).
-    pub fn with_adapter<NA, C>(self, adapter: NA) -> PoolBuilder<L, NA, S, F>
+    /// Note that this method will override any finalizer that may have been set!
+    pub fn with_state<S>(self, initial: S) -> PoolBuilder<L, C, S, ()>
     where
-        NA: Fn(L::Connection) -> C + 'static + Send + Sync,
-        C: Evented + Send + 'static,
-    {
-        PoolBuilder {
-            listener: self.listener,
-            epoch: self.epoch,
-            exit: self.exit,
-            poll: self.poll,
-            finalizer: self.finalizer,
-            state: self.state,
-
-            adapter: Arc::new(adapter),
-        }
-    }
-
-    /// Specify that a return value should be derived from the state kept by each worker.
-    ///
-    /// This return value is gathered up by the `PoolHandle` returned by `run`.
-    pub fn and_return<NF, NS, R>(self, fin: NF) -> PoolBuilder<L, A, NS, NF>
-    where
-        NS: Default,
-        NF: Fn(NS) -> R + Send + Sync + 'static,
-        R: Send + 'static,
+        S: Clone + Send + 'static,
     {
         PoolBuilder {
             listener: self.listener,
@@ -145,98 +118,77 @@ where
             poll: self.poll,
             adapter: self.adapter,
 
-            state: PhantomData,
+            initial,
+            finalizer: Arc::new(|_| ()),
+        }
+    }
+}
+
+impl<L, C, S, R> PoolBuilder<L, C, S, R>
+where
+    L: Listener,
+{
+    /// Run accepted connections through an adapter before adding them to the pool of connections.
+    ///
+    /// This allows users to wrap something akin to an `TcpStream` into a more sophisticated
+    /// connection type (e.g., by adding buffering).
+    pub fn with_adapter<NA, NC>(self, adapter: NA) -> PoolBuilder<L, NC, S, R>
+    where
+        NA: Fn(L::Connection) -> NC + 'static + Send + Sync,
+        NC: Evented + Send + 'static,
+    {
+        PoolBuilder {
+            listener: self.listener,
+            epoch: self.epoch,
+            exit: self.exit,
+            poll: self.poll,
+            initial: self.initial,
+            finalizer: self.finalizer,
+
+            adapter: Arc::new(adapter),
+        }
+    }
+
+    /// Specify that a return value should be derived from the state kept by each worker.
+    ///
+    /// This return value is gathered up by the `PoolHandle` returned by `run`.
+    pub fn and_return<NF, NR>(self, fin: NF) -> PoolBuilder<L, C, S, NR>
+    where
+        NF: Fn(S) -> NR + Send + Sync + 'static,
+        NR: Send + 'static,
+    {
+        PoolBuilder {
+            listener: self.listener,
+            epoch: self.epoch,
+            exit: self.exit,
+            poll: self.poll,
+            adapter: self.adapter,
+            initial: self.initial,
+
             finalizer: Arc::new(fin),
         }
     }
 }
 
-impl<L> PoolBuilder<L, (), (), ()>
+impl<L, C> PoolBuilder<L, C, (), ()>
 where
     L: Listener + 'static,
+    C: Evented + Send + 'static,
 {
     /// Run the pool with a stateless worker callback.
     pub fn run_stateless<E>(self, workers: usize, on_ready: E) -> PoolHandle<()>
     where
-        E: Fn(&mut L::Connection) -> io::Result<bool> + 'static + Send + Sync,
-    {
-        self.with_adapter(|c| c)
-            .and_return(|_: ()| ())
-            .run(workers, move |c, _| on_ready(c))
-    }
-}
-
-impl<L, A, C> PoolBuilder<L, A, (), ()>
-where
-    L: Listener + 'static,
-    A: Fn(L::Connection) -> C + 'static + Send + Sync,
-    C: Evented + Send + 'static,
-{
-    /// Run the pool with a connection adapter and a stateless worker callback.
-    pub fn run_stateless<E>(self, workers: usize, on_ready: E) -> PoolHandle<()>
-    where
         E: Fn(&mut C) -> io::Result<bool> + 'static + Send + Sync,
     {
-        self.and_return(|_: ()| ())
-            .run(workers, move |c, _| on_ready(c))
+        self.run(workers, move |c, _| on_ready(c))
     }
 }
 
-impl<L, A, S, C> PoolBuilder<L, A, S, ()>
+impl<L, C, S, R> PoolBuilder<L, C, S, R>
 where
     L: Listener + 'static,
-    A: Fn(L::Connection) -> C + 'static + Send + Sync,
-    S: Default,
     C: Evented + Send + 'static,
-{
-    /// Run the pool with a connection adapter.
-    pub fn run<E>(self, workers: usize, on_ready: E) -> PoolHandle<()>
-    where
-        E: Fn(&mut C, &mut S) -> io::Result<bool> + 'static + Send + Sync,
-    {
-        self.and_return(|_| ()).run(workers, on_ready)
-    }
-}
-
-impl<L, S> PoolBuilder<L, (), S, ()>
-where
-    L: Listener + 'static,
-    S: Default,
-{
-    /// Run the pool with local worker state.
-    pub fn run<E>(self, workers: usize, on_ready: E) -> PoolHandle<()>
-    where
-        E: Fn(&mut L::Connection, &mut S) -> io::Result<bool> + 'static + Send + Sync,
-    {
-        self.and_return(|_| ())
-            .with_adapter(|c| c)
-            .run(workers, on_ready)
-    }
-}
-
-impl<L, S, F, R> PoolBuilder<L, (), S, F>
-where
-    L: Listener + 'static,
-    S: Default,
-    F: Fn(S) -> R + Send + Sync + 'static,
-    R: Send + 'static,
-{
-    /// Run the pool with local worker state and a state finalizer.
-    pub fn run<E>(self, workers: usize, on_ready: E) -> PoolHandle<R>
-    where
-        E: Fn(&mut L::Connection, &mut S) -> io::Result<bool> + 'static + Send + Sync,
-    {
-        self.with_adapter(|c| c).run(workers, on_ready)
-    }
-}
-
-impl<L, A, S, F, C, R> PoolBuilder<L, A, S, F>
-where
-    L: Listener + 'static,
-    A: Fn(L::Connection) -> C + 'static + Send + Sync,
-    C: Evented + Send + 'static,
-    S: Default,
-    F: Fn(S) -> R + Send + Sync + 'static,
+    S: Clone + Send + 'static,
     R: 'static + Send,
 {
     /// Run the pool with a connection adapter, local worker state, and a state finalizer.

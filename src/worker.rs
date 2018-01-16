@@ -8,20 +8,18 @@ use slab::Slab;
 use {EXIT_EVENTUALLY, EXIT_IMMEDIATE, NO_EXIT};
 use {Listener, PoolBuilder};
 
-pub(crate) fn worker_main<L, A, S, F, C, R, E>(
+pub(crate) fn worker_main<L, C, S, R, E>(
     _i: usize,
-    pool: &PoolBuilder<L, A, S, F>,
+    pool: &PoolBuilder<L, C, S, R>,
     truth: Arc<Mutex<Slab<Arc<OneshotConnection<C>>>>>,
     on_ready: Arc<E>,
 ) -> thread::JoinHandle<R>
 where
-    A: Fn(L::Connection) -> C + 'static + Send + Sync,
-    C: Evented + Send + 'static,
     L: 'static + Listener,
-    E: Fn(&mut C, &mut S) -> io::Result<bool> + 'static + Send + Sync,
-    S: Default,
-    F: Fn(S) -> R + Send + Sync + 'static,
+    C: Evented + Send + 'static,
+    S: Clone + Send + 'static,
     R: 'static + Send,
+    E: Fn(&mut C, &mut S) -> io::Result<bool> + 'static + Send + Sync,
 {
     let mut cache_epoch;
     let listener = Arc::clone(&pool.listener);
@@ -30,6 +28,7 @@ where
         cache_epoch = pool.epoch.load(atomic::Ordering::SeqCst);
         truth.clone()
     };
+    let mut state = pool.initial.clone();
     let poll = Arc::clone(&pool.poll);
     let epoch = Arc::clone(&pool.epoch);
     let exit = Arc::clone(&pool.exit);
@@ -37,7 +36,6 @@ where
     let finalizer = Arc::clone(&pool.finalizer);
 
     thread::spawn(move || {
-        let mut worker_result = S::default();
         let mut events = Events::with_capacity(1);
         let mut status = NO_EXIT;
         while status != EXIT_IMMEDIATE {
@@ -121,7 +119,7 @@ where
                     if let Some(c) = cache.get(t) {
                         let r = {
                             let c = unsafe { c.mut_given_epoll_oneshot() };
-                            on_ready(c, &mut worker_result)
+                            on_ready(c, &mut state)
                         };
                         if let Ok(true) = r {
                             closed = true;
@@ -166,7 +164,7 @@ where
             }
         }
 
-        finalizer(worker_result)
+        finalizer(state)
     })
 }
 
