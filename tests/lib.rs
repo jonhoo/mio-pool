@@ -129,6 +129,11 @@ fn soft_exit_no_new() {
     // long-running client
     let mut c = TcpStream::connect(&addr).unwrap();
 
+    // do a round-trip to ensure the client's connection has been accepted
+    let mut buf = [0];
+    c.write_all(&[0x00]).unwrap();
+    assert_eq!(c.read(&mut buf[..]).unwrap(), 1);
+
     // start a thread that waits for workers to finish
     use std::thread;
     use std::sync::{atomic, Arc};
@@ -174,7 +179,6 @@ fn soft_exit_no_new() {
 
     // at this point, `c` should still be active (and work correctly)
     c.write_all(&[0x00]).unwrap();
-    let mut buf = [0];
     assert_eq!(c.read(&mut buf[..]).unwrap(), 1);
     // finish should therefore not yet have returned
     assert_eq!(finished.load(atomic::Ordering::SeqCst), false);
