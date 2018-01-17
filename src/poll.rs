@@ -1,71 +1,71 @@
-extern crate libc;
+extern crate nix;
 
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::RawFd;
 use std::time;
 use std::io;
+use self::nix::sys::epoll;
 
-pub(crate) struct Poll {
-    selector: RawFd,
-}
+pub(crate) struct Poll(RawFd);
 
 pub(crate) struct Token(pub usize);
 
-pub(crate) struct Events(Vec<libc::epoll_event>);
+pub(crate) struct Events {
+    all: Vec<epoll::EpollEvent>,
+
+    /// How many of the events in `.all` are filled with responses to the last `poll()`?
+    current: usize,
+}
 
 impl Events {
     pub fn with_capacity(capacity: usize) -> Events {
-        Events(Vec::with_capacity(capacity))
+        let mut events = Vec::new();
+        events.resize(capacity, epoll::EpollEvent::empty());
+        Events {
+            all: events,
+            current: 0,
+        }
+    }
+}
+
+fn nix_to_io_err(e: nix::Error) -> io::Error {
+    match e {
+        nix::Error::Sys(errno) => io::Error::from_raw_os_error(errno as i32),
+        nix::Error::InvalidPath => io::Error::new(io::ErrorKind::InvalidInput, e),
+        nix::Error::InvalidUtf8 => io::Error::new(io::ErrorKind::InvalidInput, e),
+        nix::Error::UnsupportedOperation => io::Error::new(io::ErrorKind::Other, e),
     }
 }
 
 impl Poll {
     pub fn new() -> io::Result<Self> {
-        let fd = unsafe { libc::epoll_create1(0) };
-        if fd == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(Poll { selector: fd })
-        }
+        epoll::epoll_create1(epoll::EpollCreateFlags::empty())
+            .map(Poll)
+            .map_err(nix_to_io_err)
     }
 
-    fn ctl(&self, file: &AsRawFd, t: Token, op: libc::c_int) -> io::Result<()> {
-        let fd = file.as_raw_fd();
-        let mut event = libc::epoll_event {
-            events: libc::EPOLLIN as u32 | libc::EPOLLONESHOT as u32,
-            u64: t.0 as u64,
-        };
-        if unsafe { libc::epoll_ctl(self.selector, op, fd, &mut event as *mut _) } == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+    fn ctl(&self, file: &AsRawFd, t: Token, op: epoll::EpollOp) -> io::Result<()> {
+        let mut event = epoll::EpollEvent::new(epoll::EPOLLIN | epoll::EPOLLONESHOT, t.0 as u64);
+        epoll::epoll_ctl(self.0, op, file.as_raw_fd(), &mut event).map_err(nix_to_io_err)
     }
 
     pub fn register(&self, file: &AsRawFd, t: Token) -> io::Result<()> {
-        self.ctl(file, t, libc::EPOLL_CTL_ADD)
+        self.ctl(file, t, epoll::EpollOp::EpollCtlAdd)
     }
 
     pub fn reregister(&self, file: &AsRawFd, t: Token) -> io::Result<()> {
-        self.ctl(file, t, libc::EPOLL_CTL_MOD)
+        self.ctl(file, t, epoll::EpollOp::EpollCtlMod)
     }
 
     pub fn poll(&self, events: &mut Events, timeout: Option<time::Duration>) -> io::Result<usize> {
-        events.0.clear();
-        let maxevents = events.0.capacity() as i32;
         let timeout = match timeout {
             None => 0,
             Some(d) => d.as_secs() * 1000 + d.subsec_nanos() as u64 / 1_000_000,
-        } as i32;
+        } as isize;
 
-        let n =
-            unsafe { libc::epoll_wait(self.selector, events.0.as_mut_ptr(), maxevents, timeout) };
-        if n == -1 {
-            return Err(io::Error::last_os_error());
-        }
-
-        unsafe { events.0.set_len(n as usize) };
-        Ok(n as usize)
+        events.current =
+            epoll::epoll_wait(self.0, &mut events.all[..], timeout).map_err(nix_to_io_err)?;
+        Ok(events.current)
     }
 }
 
@@ -90,9 +90,14 @@ impl<'a> Iterator for EventsIterator<'a> {
     type Item = Token;
     fn next(&mut self) -> Option<Self::Item> {
         let at = &mut self.at;
-        self.events.0.get(*at).map(|e| {
+        if *at >= self.events.current {
+            // events beyond .1 are old
+            return None;
+        }
+
+        self.events.all.get(*at).map(|e| {
             *at += 1;
-            Token(e.u64 as usize)
+            Token(e.data() as usize)
         })
     }
 }
