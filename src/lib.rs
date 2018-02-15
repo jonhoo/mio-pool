@@ -71,7 +71,9 @@ pub(crate) const NO_EXIT: usize = 0;
 pub(crate) const EXIT_IMMEDIATE: usize = 1;
 pub(crate) const EXIT_EVENTUALLY: usize = 2;
 
-pub(crate) mod poll;
+/// An implementation of a `Poll` interface very similar to that of `mio::Poll`.
+pub mod poll;
+
 mod builder;
 pub use builder::PoolBuilder;
 pub(crate) mod worker;
