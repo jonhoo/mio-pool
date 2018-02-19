@@ -246,9 +246,9 @@ impl Poll {
     /// [struct]: #
     pub fn poll(&self, events: &mut Events, timeout: Option<time::Duration>) -> io::Result<usize> {
         let timeout = match timeout {
-            None => 0,
-            Some(d) => d.as_secs() * 1000 + d.subsec_nanos() as u64 / 1_000_000,
-        } as isize;
+            None => -1,
+            Some(d) => (d.as_secs() * 1000 + d.subsec_nanos() as u64 / 1_000_000) as isize,
+        };
 
         events.current =
             epoll::epoll_wait(self.0, &mut events.all[..], timeout).map_err(nix_to_io_err)?;
