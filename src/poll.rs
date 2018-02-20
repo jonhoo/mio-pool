@@ -176,7 +176,10 @@ impl Poll {
     }
 
     fn ctl(&self, file: &AsRawFd, t: Token, op: epoll::EpollOp) -> io::Result<()> {
-        let mut event = epoll::EpollEvent::new(epoll::EPOLLIN | epoll::EPOLLONESHOT, t.0 as u64);
+        let mut event = epoll::EpollEvent::new(
+            epoll::EpollFlags::EPOLLIN | epoll::EpollFlags::EPOLLONESHOT,
+            t.0 as u64,
+        );
         epoll::epoll_ctl(self.0, op, file.as_raw_fd(), &mut event).map_err(nix_to_io_err)
     }
 

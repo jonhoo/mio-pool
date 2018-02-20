@@ -1,6 +1,6 @@
 [package]
 name = "mio-pool"
-version = "0.5.3"
+version = "0.5.4"
 
 description = "A worker pool collectively handling a set of connections"
 readme = "README.md"
@@ -22,4 +22,4 @@ travis-ci = { repository = "jonhoo/mio-pool" }
 [dependencies]
 mio = "0.6"
 slab = "0.4"
-nix = "0.9"
+nix = "0.10"
