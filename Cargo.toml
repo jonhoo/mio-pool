@@ -1,6 +1,6 @@
 [package]
 name = "mio-pool"
-version = "0.5.4"
+version = "0.5.5"
 
 description = "A worker pool collectively handling a set of connections"
 readme = "README.md"

@@ -69,6 +69,7 @@ where
     pub(super) initial: S,
     pub(super) adapter: Arc<Fn(L::Connection) -> C + 'static + Send + Sync>,
     pub(super) finalizer: Arc<Fn(S) -> R + Send + Sync + 'static>,
+    thread_name_prefix: String,
 }
 
 impl<L> PoolBuilder<L, L::Connection, (), ()>
@@ -92,6 +93,8 @@ where
             initial: (),
             adapter: Arc::new(|c| c),
             finalizer: Arc::new(|_| ()),
+
+            thread_name_prefix: String::from("pool-"),
         })
     }
 }
@@ -116,6 +119,8 @@ where
 
             initial,
             finalizer: Arc::new(|_| ()),
+
+            thread_name_prefix: String::from("pool-"),
         }
     }
 }
@@ -124,6 +129,12 @@ impl<L, C, S, R> PoolBuilder<L, C, S, R>
 where
     L: Listener,
 {
+    /// Set the thread name prefix to use for the worker threads in this pool.
+    pub fn set_thread_name_prefix(mut self, prefix: &str) -> Self {
+        self.thread_name_prefix = prefix.to_string();
+        self
+    }
+
     /// Run accepted connections through an adapter before adding them to the pool of connections.
     ///
     /// This allows users to wrap something akin to an `TcpStream` into a more sophisticated
@@ -142,6 +153,8 @@ where
             finalizer: self.finalizer,
 
             adapter: Arc::new(adapter),
+
+            thread_name_prefix: String::from("pool-"),
         }
     }
 
@@ -162,6 +175,8 @@ where
             initial: self.initial,
 
             finalizer: Arc::new(fin),
+
+            thread_name_prefix: String::from("pool-"),
         }
     }
 }
@@ -195,7 +210,15 @@ where
         let truth = Arc::new(Mutex::new(Slab::new()));
         let on_ready = Arc::new(on_ready);
         let wrkrs: Vec<_> = (0..workers)
-            .map(|i| worker_main(i, &self, Arc::clone(&truth), Arc::clone(&on_ready)))
+            .map(|i| {
+                worker_main(
+                    &*self.thread_name_prefix,
+                    i,
+                    &self,
+                    Arc::clone(&truth),
+                    Arc::clone(&on_ready),
+                )
+            })
             .collect();
         PoolHandle {
             threads: wrkrs,
