@@ -116,11 +116,10 @@ where
             exit: self.exit,
             poll: self.poll,
             adapter: self.adapter,
+            thread_name_prefix: self.thread_name_prefix,
 
             initial,
             finalizer: Arc::new(|_| ()),
-
-            thread_name_prefix: String::from("pool-"),
         }
     }
 }
@@ -151,10 +150,9 @@ where
             poll: self.poll,
             initial: self.initial,
             finalizer: self.finalizer,
+            thread_name_prefix: self.thread_name_prefix,
 
             adapter: Arc::new(adapter),
-
-            thread_name_prefix: String::from("pool-"),
         }
     }
 
@@ -173,10 +171,9 @@ where
             poll: self.poll,
             adapter: self.adapter,
             initial: self.initial,
+            thread_name_prefix: self.thread_name_prefix,
 
             finalizer: Arc::new(fin),
-
-            thread_name_prefix: String::from("pool-"),
         }
     }
 }
