@@ -1,6 +1,6 @@
 [package]
 name = "mio-pool"
-version = "0.5.6"
+version = "0.5.7"
 
 description = "A worker pool collectively handling a set of connections"
 readme = "README.md"
@@ -18,8 +18,9 @@ license = "MIT/Apache-2.0"
 
 [badges]
 travis-ci = { repository = "jonhoo/mio-pool" }
+maintenance = { status = "deprecated" }
 
 [dependencies]
 mio = "0.6"
 slab = "0.4"
-nix = "0.10"
+nix = "0.12"
